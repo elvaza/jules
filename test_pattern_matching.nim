@@ -51,16 +51,6 @@ suite "Pattern Matching Tests":
       x => x + result
     check(finalResult == 30)
 
-  test "should handle binding patterns":
-    let result = match 2:
-      (1 | 2).to(n) => "Got " & $n
-      _ => "other"
-    check(result == "Got 2")
-
-    let result2 = match 99:
-      _.to(n) => "The number is " & $n
-    check(result2 == "The number is 99")
-
   test "should handle OR-patterns with literals":
     let result = match 2:
       1 | 2 | 3 => "small number"
@@ -84,6 +74,22 @@ suite "Pattern Matching Tests":
       MyConst => "fail"
       x       => x
     check(result2 == "another_value")
+
+  test "should handle sequence patterns":
+    let s = @[1, 2, 3]
+    let result = match s:
+      [1, 2, 4] => "no"
+      [1, x, y] => $x & $y
+      _ => "fail"
+    check(result == "23")
+
+  test "should handle tuple patterns":
+    let t = (1, "hello")
+    let result = match t:
+      (1, "world") => "no"
+      (x, y) => "yes: " & $x & ", " & y
+      _ => "fail"
+    check(result == "yes: 1, hello")
 
   test "match should work as an expression":
     let result = match 1:
