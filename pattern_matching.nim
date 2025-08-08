@@ -46,8 +46,12 @@ proc validateAndExtractArms(patterns: NimNode): seq[(NimNode, NimNode, seq[NimNo
 
     if arm.kind in {nnkEmpty, nnkCommentStmt}: continue
 
-    if arm.kind != nnkInfix or arm.len != 3 or arm[0].kind != nnkIdent or arm[0].strVal != "=>":
-      error("Expected 'pattern => body', but got: " & arm.repr, arm)
+    if arm.kind != nnkInfix:
+      error("Expected 'pattern => body' (infix expression), but got: " & $arm.kind, arm)
+    if arm.len != 3:
+      error("Expected 'pattern => body' (3 children), but got: " & $arm.len, arm)
+    if arm[0].kind != nnkIdent or arm[0].strVal != "=>":
+      error("Expected '=>' operator, but got: " & arm[0].repr, arm[0])
 
     var currentPattern = arm[1]
     let body = arm[2]
@@ -82,16 +86,7 @@ proc buildConditionalChain(arms: seq[(NimNode, NimNode, seq[NimNode])], tmpVar: 
   ## Constructs the if/elif/else chain from the match arms.
   result = newTree(nnkIfStmt)
   var wildcardBody: NimNode = nil
-  var wildcardAsNames: seq[NimNode] = @[]
-
-  proc createBody(body: NimNode, bindings: NimNode): NimNode =
-    if bindings.len == 0:
-      return body
-    else:
-      return quote do:
-        block:
-          `bindings`
-          `body`
+  var wildcardAsNames: seq[NimNode] = @[] # Unused
 
   for (pattern, body, asNames) in arms:
     let allBindings = newStmtList() # AS patterns disabled, so this is empty.
@@ -100,7 +95,7 @@ proc buildConditionalChain(arms: seq[(NimNode, NimNode, seq[NimNode])], tmpVar: 
     case kind
     of pkLiteral:
       let condition = quote do: `tmpVar` == `pattern`
-      result.add(newTree(nnkElifBranch, condition, createBody(body, allBindings)))
+      result.add(newTree(nnkElifBranch, condition, newStmtList(allBindings, body)))
     of pkVariable:
       let isVarDef = false
       allBindings.add(quote do:
@@ -108,7 +103,7 @@ proc buildConditionalChain(arms: seq[(NimNode, NimNode, seq[NimNode])], tmpVar: 
           let `pattern` {.inject.} = `tmpVar`
       )
       let condition = newIdentNode("true")
-      result.add(newTree(nnkElifBranch, condition, createBody(body, allBindings)))
+      result.add(newTree(nnkElifBranch, condition, newStmtList(allBindings, body)))
     of pkWildcard:
       wildcardBody = body
       wildcardAsNames = asNames
@@ -117,7 +112,7 @@ proc buildConditionalChain(arms: seq[(NimNode, NimNode, seq[NimNode])], tmpVar: 
 
   if wildcardBody != nil:
     let allBindings = newStmtList() # AS patterns disabled
-    result.add(newTree(nnkElse, createBody(wildcardBody, allBindings)))
+    result.add(newTree(nnkElse, newStmtList(allBindings, wildcardBody)))
   else:
     let msg = newLit("Non-exhaustive pattern match. No branch was taken.")
     let exception = newCall(bindSym"newException", ident("Defect"), msg)
@@ -139,7 +134,5 @@ macro `match`*(scrutinee: typed, patterns: untyped): untyped =
   let tmpVar = genSym(nskLet, "tmp")
   let conditionalChain = buildConditionalChain(arms, tmpVar)
 
-  result = quote do:
-    block:
-      let `tmpVar` = `scrutinee`
-      `conditionalChain`
+  let tmpVarBinding = newLetStmt(tmpVar, scrutinee)
+  result = newBlockStmt(newStmtList(tmpVarBinding, conditionalChain))
