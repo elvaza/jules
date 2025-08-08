@@ -1,6 +1,7 @@
 import unittest
 import pattern_matching
 import std/tables
+import std/json
 
 const MyConst = "a_constant_value"
 
@@ -126,6 +127,31 @@ suite "Pattern Matching Tests":
       Person(name: "jules", age: a) => a
       _ => -1
     check(result2 == 1)
+
+  test "should handle nested mapping and sequence patterns":
+    let keyboardEvent = %*{"keyboard": {"key": {"code": "Enter"}}}
+    let r1 = match keyboardEvent:
+      {"keyboard": {"key": {"code": code}}} => "Key: " & code.getStr()
+      _ => "other"
+    check(r1 == "Key: Enter")
+
+    let mouseEvent = %*{"mouse": {"cursor": {"screen": [100, 200]}}}
+    let r2 = match mouseEvent:
+      {"mouse": {"cursor": {"screen": [x, y]}}} => "Mouse: " & $x.getInt() & ", " & $y.getInt()
+      _ => "other"
+    check(r2 == "Mouse: 100, 200")
+
+  test "should handle guards with and":
+    let commands = ["help", "exit"]
+    let result = match "help":
+      cmd and cmd in commands => "known"
+      _ => "unknown"
+    check(result == "known")
+
+    let result2 = match "other":
+      cmd and cmd in commands => "known"
+      _ => "unknown"
+    check(result2 == "unknown")
 
   test "match should work as an expression":
     let result = match 1:

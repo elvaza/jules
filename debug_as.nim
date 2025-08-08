@@ -41,7 +41,7 @@ when isMainModule:
   let x = 99
   echo "Running minimal test..."
   let y = miniMatch x:
-    _ as z => z
+    _.to(z) => z
 
   echo "Result: ", y
   assert y == 99

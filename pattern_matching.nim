@@ -4,12 +4,13 @@ import std/macros
 ##
 ## This library provides a `match` macro for pattern matching in Nim.
 
-proc validateAndExtractArms(patterns: NimNode): seq[(NimNode, NimNode)] =
+proc validateAndExtractArms(patterns: NimNode): seq[(NimNode, NimNode, NimNode)] =
   ## Parses, validates, and expands the arms of a match expression.
+  ## Returns seq of (pattern, guard, body).
   if patterns.kind != nnkStmtList:
     error("Match arms must be provided as a statement list.", patterns)
 
-  var expandedArms: seq[(NimNode, NimNode)] = @[]
+  var expandedArms: seq[(NimNode, NimNode, NimNode)] = @[]
 
   proc flatten(p: NimNode): seq[NimNode] =
     if p.kind == nnkInfix and p.len == 3 and p[0].kind == nnkIdent and p[0].strVal == "|":
@@ -25,8 +26,13 @@ proc validateAndExtractArms(patterns: NimNode): seq[(NimNode, NimNode)] =
     if arm.kind != nnkInfix or arm.len != 3 or arm[0].kind != nnkIdent or arm[0].strVal != "=>":
       error("Expected 'pattern => body', but got: " & arm.repr, arm)
 
-    let pattern = arm[1]
+    var pattern = arm[1]
     let body = arm[2]
+    var guard: NimNode = nil
+
+    if pattern.kind == nnkInfix and pattern.len == 3 and pattern[0].kind == nnkIdent and pattern[0].strVal == "and":
+      guard = pattern[2]
+      pattern = pattern[1]
 
     if pattern.kind == nnkEmpty: error("Pattern cannot be empty.", arm)
     if body.kind == nnkEmpty: error("Body cannot be empty.", arm)
@@ -35,22 +41,20 @@ proc validateAndExtractArms(patterns: NimNode): seq[(NimNode, NimNode)] =
     let isOrPattern = subPatterns.len > 1
 
     for p in subPatterns:
-      # Basic validation for OR-patterns.
       if isOrPattern and p.kind == nnkIdent:
         if p.strVal == "_" or not compiles(p.repr):
           error("Variable bindings and wildcards are not permitted inside OR-patterns.", p)
 
-      expandedArms.add((p, body))
+      expandedArms.add((p, guard, body))
 
   if expandedArms.len == 0:
     error("Match expression must have at least one arm.", patterns)
 
   return expandedArms
 
-proc genPatternCode(pattern, input: NimNode): (NimNode, NimNode) =
-  ## Recursively generates the code for a given pattern.
-  ## Returns a tuple of (condition, bindings).
-  var bindings = newStmtList()
+proc genPatternCode(pattern, input: NimNode): NimNode =
+  ## Recursively generates the condition for a given pattern.
+  ## Bindings are generated inside the condition.
   var condition: NimNode
 
   case pattern.kind
@@ -66,90 +70,77 @@ proc genPatternCode(pattern, input: NimNode): (NimNode, NimNode) =
       condition = quote do: `input` == `pattern`
     else:
       condition = quote do:
-        when compiles(`pattern`):
-          `input` == `pattern`
-        else:
-          true
+        block:
+          when not compiles(`pattern`):
+            let `pattern` {.inject.} = `input`
+          when compiles(`pattern`):
+            `input` == `pattern`
+          else:
+            true
 
-      bindings.add(quote do:
-        when not compiles(`pattern`):
-          let `pattern` {.inject.} = `input`)
-
-  of nnkBracket: # Sequence or Array Pattern
+  of nnkBracket:
     let patternLen = newLit(pattern.len)
     condition = quote do: `input`.len == `patternLen`
-
     for i, subPattern in pattern:
       let subInput = quote do: `input`[`i`]
-      let (subCond, subBinds) = genPatternCode(subPattern, subInput)
+      let subCond = genPatternCode(subPattern, subInput)
       condition = quote do: `condition` and `subCond`
-      for b in subBinds: bindings.add(b)
 
-  of nnkPar, nnkTupleConstr: # Tuple Pattern
-    condition = newIdentNode("true") # Assume length is correct for now
-
+  of nnkPar, nnkTupleConstr:
+    condition = newIdentNode("true")
     for i, subPattern in pattern:
       let subInput = quote do: `input`[`i`]
-      let (subCond, subBinds) = genPatternCode(subPattern, subInput)
+      let subCond = genPatternCode(subPattern, subInput)
       condition = quote do: `condition` and `subCond`
-      for b in subBinds: bindings.add(b)
 
-  of nnkCurly, nnkTableConstr: # Mapping Pattern
+  of nnkCurly, nnkTableConstr:
     condition = newIdentNode("true")
     for pair in pattern:
       if pair.kind != nnkExprColonExpr:
         error("Mapping patterns expect `key: value` pairs.", pair)
-
       let key = pair[0]
       let valPattern = pair[1]
-
       let hasKeyCheck = quote do: `input`.haskey(`key`)
       condition = quote do: `condition` and `hasKeyCheck`
-
       let valInput = quote do: `input`[`key`]
-      let (valCond, valBinds) = genPatternCode(valPattern, valInput)
-      condition = quote do: `condition` and `valCond`
+      let subCond = genPatternCode(valPattern, valInput)
+      condition = quote do: `condition` and `subCond`
 
-      for b in valBinds: bindings.add(b)
-
-  of nnkCall, nnkObjConstr: # Class Pattern
+  of nnkCall, nnkObjConstr:
     let objType = pattern[0]
     condition = quote do: `input` is `objType`
-
     for i in 1..<pattern.len:
       let pair = pattern[i]
       if pair.kind != nnkExprColonExpr:
         error("Class patterns expect `field: value` pairs.", pair)
-
       let fieldName = pair[0]
       let fieldPattern = pair[1]
-
       let fieldInput = quote do: `input`.`fieldName`
-      let (fieldCond, fieldBinds) = genPatternCode(fieldPattern, fieldInput)
-      condition = quote do: `condition` and `fieldCond`
-
-      for b in fieldBinds: bindings.add(b)
+      let subCond = genPatternCode(fieldPattern, fieldInput)
+      condition = quote do: `condition` and `subCond`
 
   else:
     error("Unsupported pattern type: " & pattern.repr, pattern)
 
-  return (condition, bindings)
+  return condition
 
-proc buildConditionalChain(arms: seq[(NimNode, NimNode)], tmpVar: NimNode): NimNode =
-  ## Constructs the if/elif/else chain from the match arms.
+proc buildConditionalChain(arms: seq[(NimNode, NimNode, NimNode)], tmpVar: NimNode): NimNode =
   result = newTree(nnkIfStmt)
   var hasElse = false
 
-  for (pattern, body) in arms:
+  for (pattern, guard, body) in arms:
     if pattern.kind == nnkIdent and pattern.strVal == "_":
       if hasElse: error("Cannot have multiple wildcard/else branches.", pattern)
+      if guard != nil: error("Wildcard pattern `_` cannot have a guard.", pattern)
       result.add(newTree(nnkElse, body))
       hasElse = true
       continue
 
-    let (condition, bindings) = genPatternCode(pattern, tmpVar)
-    let branchBody = if bindings.len > 0: newStmtList(bindings, body) else: body
-    result.add(newTree(nnkElifBranch, condition, branchBody))
+    var condition = genPatternCode(pattern, tmpVar)
+    if guard != nil:
+      condition = quote do: `condition` and `guard`
+
+    result.add(newTree(nnkElifBranch, condition, body))
 
   if not hasElse:
     let msg = newLit("Non-exhaustive pattern match. No branch was taken.")
@@ -160,8 +151,6 @@ proc buildConditionalChain(arms: seq[(NimNode, NimNode)], tmpVar: NimNode): NimN
   return result
 
 macro `match`*(scrutinee: typed, patterns: untyped): untyped =
-  ## The main match macro.
-
   let arms = validateAndExtractArms(patterns)
   let tmpVar = genSym(nskLet, "tmp")
   let conditionalChain = buildConditionalChain(arms, tmpVar)
