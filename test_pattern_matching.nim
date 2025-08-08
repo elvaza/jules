@@ -153,6 +153,16 @@ suite "Pattern Matching Tests":
       _ => "unknown"
     check(result2 == "unknown")
 
+  test "should handle binding patterns":
+    let result = match 2:
+      (1 | 2) @ n => "Got " & $n
+      _ => "other"
+    check(result == "Got 2")
+
+    let result2 = match 99:
+      _ @ n => "The number is " & $n
+    check(result2 == "The number is 99")
+
   test "match should work as an expression":
     let result = match 1:
       1 => "one"

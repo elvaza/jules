@@ -4,6 +4,11 @@ import std/macros
 ##
 ## This library provides a `match` macro for pattern matching in Nim.
 
+template to*(patt, name: untyped): untyped =
+  ## Helper template to create a binding pattern (AS-pattern).
+  ## Transforms `pattern.to(name)` into an AST node that `match` can parse.
+  nnkInfix.newTree(ident"@", patt, name)
+
 proc validateAndExtractArms(patterns: NimNode): seq[(NimNode, NimNode, NimNode)] =
   ## Parses, validates, and expands the arms of a match expression.
   ## Returns seq of (pattern, guard, body).
@@ -70,12 +75,11 @@ proc genPatternCode(pattern, input: NimNode): NimNode =
       condition = quote do: `input` == `pattern`
     else:
       condition = quote do:
-        block:
-          when not compiles(`pattern`):
+        when compiles(`pattern`):
+          `input` == `pattern`
+        else:
+          block:
             let `pattern` {.inject.} = `input`
-          when compiles(`pattern`):
-            `input` == `pattern`
-          else:
             true
 
   of nnkBracket:
@@ -118,6 +122,19 @@ proc genPatternCode(pattern, input: NimNode): NimNode =
       let fieldInput = quote do: `input`.`fieldName`
       let subCond = genPatternCode(fieldPattern, fieldInput)
       condition = quote do: `condition` and `subCond`
+
+  of nnkInfix:
+    if pattern.len == 3 and pattern[0].kind == nnkIdent and pattern[0].strVal == "@":
+      let p = pattern[1]
+      let name = pattern[2]
+      let p_cond = genPatternCode(p, input)
+
+      condition = quote do:
+        `p_cond` and (block:
+          let `name` {.inject.} = `input`
+          true)
+    else:
+      error("Unsupported pattern type: " & pattern.repr, pattern)
 
   else:
     error("Unsupported pattern type: " & pattern.repr, pattern)
