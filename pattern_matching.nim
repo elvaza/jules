@@ -94,6 +94,42 @@ proc genPatternCode(pattern, input: NimNode): (NimNode, NimNode) =
       condition = quote do: `condition` and `subCond`
       for b in subBinds: bindings.add(b)
 
+  of nnkCurly, nnkTableConstr: # Mapping Pattern
+    condition = newIdentNode("true")
+    for pair in pattern:
+      if pair.kind != nnkExprColonExpr:
+        error("Mapping patterns expect `key: value` pairs.", pair)
+
+      let key = pair[0]
+      let valPattern = pair[1]
+
+      let hasKeyCheck = quote do: `input`.haskey(`key`)
+      condition = quote do: `condition` and `hasKeyCheck`
+
+      let valInput = quote do: `input`[`key`]
+      let (valCond, valBinds) = genPatternCode(valPattern, valInput)
+      condition = quote do: `condition` and `valCond`
+
+      for b in valBinds: bindings.add(b)
+
+  of nnkCall, nnkObjConstr: # Class Pattern
+    let objType = pattern[0]
+    condition = quote do: `input` is `objType`
+
+    for i in 1..<pattern.len:
+      let pair = pattern[i]
+      if pair.kind != nnkExprColonExpr:
+        error("Class patterns expect `field: value` pairs.", pair)
+
+      let fieldName = pair[0]
+      let fieldPattern = pair[1]
+
+      let fieldInput = quote do: `input`.`fieldName`
+      let (fieldCond, fieldBinds) = genPatternCode(fieldPattern, fieldInput)
+      condition = quote do: `condition` and `fieldCond`
+
+      for b in fieldBinds: bindings.add(b)
+
   else:
     error("Unsupported pattern type: " & pattern.repr, pattern)
 

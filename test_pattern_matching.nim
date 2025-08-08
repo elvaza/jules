@@ -1,7 +1,13 @@
 import unittest
 import pattern_matching
+import std/tables
 
 const MyConst = "a_constant_value"
+
+type
+  Person = object
+    name: string
+    age: int
 
 suite "Pattern Matching Tests":
 
@@ -90,6 +96,36 @@ suite "Pattern Matching Tests":
       (x, y) => "yes: " & $x & ", " & y
       _ => "fail"
     check(result == "yes: 1, hello")
+
+  test "should handle mapping patterns":
+    var t1 = initTable[string, int]()
+    t1["name"] = 100
+    t1["age"] = 1
+    let result = match t1:
+      {"name": 100, "age": x} => x
+      _ => -1
+    check(result == 1)
+
+    var t2 = initTable[string, string]()
+    t2["name"] = "jules"
+    let result2 = match t2:
+      {"name": "not-jules"} => "no"
+      {"name": n} => "name is " & n
+      _ => "fail"
+    check(result2 == "name is jules")
+
+  test "should handle class patterns":
+    let p = Person(name: "jules", age: 1)
+    let result = match p:
+      Person(name: "dave", age: _) => "dave"
+      Person(name: n, age: 1) => "jules is 1"
+      _ => "fail"
+    check(result == "jules is 1")
+
+    let result2 = match p:
+      Person(name: "jules", age: a) => a
+      _ => -1
+    check(result2 == 1)
 
   test "match should work as an expression":
     let result = match 1:
