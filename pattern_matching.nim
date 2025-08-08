@@ -4,12 +4,18 @@ import std/macros
 ##
 ## This library provides a `match` macro for pattern matching in Nim.
 
-proc validateAndExtractArms(patterns: NimNode): seq[(NimNode, NimNode)] =
+template to*(patt, name: untyped): untyped =
+  ## Helper template to create a binding pattern (AS-pattern).
+  ## Transforms `pattern.to(name)` into an AST node that `match` can parse.
+  nnkInfix.newTree(ident"@", patt, name)
+
+proc validateAndExtractArms(patterns: NimNode): seq[(NimNode, NimNode, seq[NimNode])] =
   ## Parses, validates, and expands the arms of a match expression.
+  ## Returns seq of (pattern, body, as-names).
   if patterns.kind != nnkStmtList:
     error("Match arms must be provided as a statement list.", patterns)
 
-  var expandedArms: seq[(NimNode, NimNode)] = @[]
+  var expandedArms: seq[(NimNode, NimNode, seq[NimNode])] = @[]
 
   proc flatten(p: NimNode): seq[NimNode] =
     if p.kind == nnkInfix and p.len == 3 and p[0].kind == nnkIdent and p[0].strVal == "|":
@@ -25,13 +31,21 @@ proc validateAndExtractArms(patterns: NimNode): seq[(NimNode, NimNode)] =
     if arm.kind != nnkInfix or arm.len != 3 or arm[0].kind != nnkIdent or arm[0].strVal != "=>":
       error("Expected 'pattern => body', but got: " & arm.repr, arm)
 
-    let pattern = arm[1]
+    var currentPattern = arm[1]
     let body = arm[2]
+    var asNames: seq[NimNode] = @[]
 
-    if pattern.kind == nnkEmpty: error("Pattern cannot be empty.", arm)
+    while currentPattern.kind == nnkInfix and currentPattern.len == 3 and currentPattern[0].strVal == "@":
+      let boundName = currentPattern[2]
+      if boundName.kind != nnkIdent:
+        error("Binding pattern requires a variable name.", boundName)
+      asNames.add(boundName)
+      currentPattern = currentPattern[1]
+
+    if currentPattern.kind == nnkEmpty: error("Pattern cannot be empty.", arm)
     if body.kind == nnkEmpty: error("Body cannot be empty.", arm)
 
-    let subPatterns = flatten(pattern)
+    let subPatterns = flatten(currentPattern)
     let isOrPattern = subPatterns.len > 1
 
     for p in subPatterns:
@@ -39,52 +53,70 @@ proc validateAndExtractArms(patterns: NimNode): seq[(NimNode, NimNode)] =
         if p.strVal == "_" or not compiles(p.repr):
           error("Variable bindings and wildcards are not permitted inside OR-patterns.", p)
 
-      expandedArms.add((p, body))
+      expandedArms.add((p, body, asNames))
 
   if expandedArms.len == 0:
     error("Match expression must have at least one arm.", patterns)
 
   return expandedArms
 
-proc buildConditionalChain(arms: seq[(NimNode, NimNode)], tmpVar: NimNode): NimNode =
+proc buildConditionalChain(arms: seq[(NimNode, NimNode, seq[NimNode])], tmpVar: NimNode): NimNode =
   ## Constructs the if/elif/else chain from the match arms.
   result = newTree(nnkIfStmt)
   var hasElse = false
 
-  for (pattern, body) in arms:
+  for (pattern, body, asNames) in arms:
     var condition: NimNode
-    var branchBody = body
+
+    var bindings = newStmtList()
+    for name in asNames:
+      bindings.add(quote do: let `name` {.inject.} = `tmpVar`)
 
     case pattern.kind
     of nnkIntLit..nnkUInt64Lit, nnkFloatLit..nnkFloat64Lit,
        nnkStrLit..nnkTripleStrLit, nnkCharLit, nnkDotExpr:
-      condition = quote do: `tmpVar` == `pattern`
+
+      let comp = quote do: `tmpVar` == `pattern`
+      if bindings.len > 0:
+        condition = quote do:
+          block:
+            `bindings`
+            `comp`
+      else:
+        condition = comp
 
     of nnkIdent:
       let s = pattern.strVal
       if s == "_":
         if hasElse: error("Cannot have multiple wildcard/else branches.", pattern)
-        result.add(newTree(nnkElse, body))
+        let elseBody = if bindings.len > 0: quote do: block: `bindings`; `body` else: body
+        result.add(newTree(nnkElse, elseBody))
         hasElse = true
         continue
       elif s in ["true", "false"]:
-        condition = quote do: `tmpVar` == `pattern`
+        let comp = quote do: `tmpVar` == `pattern`
+        if bindings.len > 0:
+          condition = quote do: block: `bindings`; `comp`
+        else:
+          condition = comp
       else:
-        condition = quote do:
-          when compiles(`pattern`):
-            `tmpVar` == `pattern`
-          else:
-            true
-
-        branchBody = quote do:
+        let captureBinding = quote do:
           when not compiles(`pattern`):
             let `pattern` {.inject.} = `tmpVar`
-          `body`
+        bindings.add(captureBinding)
+
+        condition = quote do:
+          block:
+            `bindings`
+            when compiles(`pattern`):
+              `tmpVar` == `pattern`
+            else:
+              true
 
     else:
       error("Unsupported pattern type: " & pattern.repr, pattern)
 
-    result.add(newTree(nnkElifBranch, condition, branchBody))
+    result.add(newTree(nnkElifBranch, condition, body))
 
   if not hasElse:
     let msg = newLit("Non-exhaustive pattern match. No branch was taken.")

@@ -51,15 +51,15 @@ suite "Pattern Matching Tests":
       x => x + result
     check(finalResult == 30)
 
-  # test "should handle AS-patterns":
-  #   let result = match 2:
-  #     1 | 2 @ n => "Got " & $n
-  #     _ => "other"
-  #   check(result == "Got 2")
+  test "should handle binding patterns":
+    let result = match 2:
+      (1 | 2).to(n) => "Got " & $n
+      _ => "other"
+    check(result == "Got 2")
 
-  #   let result2 = match 99:
-  #     _ @ n => "The number is " & $n
-  #   check(result2 == "The number is 99")
+    let result2 = match 99:
+      _.to(n) => "The number is " & $n
+    check(result2 == "The number is 99")
 
   test "should handle OR-patterns with literals":
     let result = match 2:
